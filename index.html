@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Porsche FAP Viewer</title>
+    <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; background: #f4f7f6; margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+        #upload-view { text-align: center; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); width: 100%; max-width: 500px; margin: 20px; }
+        h2 { margin-top: 0; color: #333; }
+        #dropzone { border: 3px dashed #ccd5dc; border-radius: 10px; padding: 50px 20px; background: #fafbfc; color: #666; cursor: pointer; transition: all 0.2s ease; margin-bottom: 20px; font-weight: 500; }
+        #dropzone.dragover { border-color: #d50000; background: #fff5f5; color: #d50000; }
+        #dropzone small { font-weight: normal; font-size: 0.85em; color: #999; }
+        #status { font-size: 0.95em; min-height: 24px; }
+
+        #viewer-view { display: none; width: 100%; height: 100vh; flex-direction: column; background: #fff; }
+        .toolbar { background: #2c3e50; padding: 12px 20px; display: flex; justify-content: space-between; align-items: center; color: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); z-index: 10;}
+        .toolbar h3 { margin: 0; font-size: 1.1em; font-weight: normal; }
+        .btn { background: #d50000; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 0.9em; margin-left: 10px; transition: background 0.2s; }
+        .btn:hover { background: #b00000; }
+        .btn-secondary { background: #4a5c6d; }
+        .btn-secondary:hover { background: #3d4c5a; }
+        iframe { flex-grow: 1; border: none; width: 100%; height: 100%; background: #fff;}
+    </style>
+</head>
+<body>
+    
+    <div id="upload-view">
+        <h2>FAP Viewer</h2>
+        <p style="color: #666; font-size: 0.9em; margin-bottom: 30px;">
+            Drag and drop the FAP XML file here. It will be natively converted into interactive HTML.
+        </p>
+        
+        <div id="dropzone">
+            Drop XML file here<br>
+            <small>or click to select</small>
+        </div>
+        <input type="file" id="fileInput" accept=".xml" style="display: none;">
+        
+        <div id="status"></div>
+    </div>
+
+    <div id="viewer-view">
+        <div class="toolbar">
+            <h3 id="file-title">FAP Report</h3>
+            <div>
+                <button class="btn btn-secondary" id="btn-download">Export as HTML</button>
+                <button class="btn" id="btn-close">Close & New File</button>
+            </div>
+        </div>
+        <iframe id="preview-frame"></iframe>
+    </div>
+
+    <script>
+        const dropzone = document.getElementById('dropzone');
+        const fileInput = document.getElementById('fileInput');
+        const status = document.getElementById('status');
+        
+        let currentBlobUrl = null;
+        let currentFileName = "";
+
+        // Escape HTML entities to prevent injection attacks when parsing untrusted XML nodes
+        const escapeHTML = str => (str || '').replace(/[&<>'"]/g, 
+            tag => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'}[tag]));
+
+        // Generate the complete HTML document string natively from the parsed XML DOM
+        function generateHTML(xml) {
+            const title = escapeHTML(xml.querySelector('RESULT > TITLE')?.textContent);
+            const vin = escapeHTML(xml.querySelector('VEHICLE IDENT VIN')?.textContent);
+            const odometerNode = xml.querySelector('VEHICLE DATA ODOMETER');
+            const odometer = escapeHTML(odometerNode?.textContent) + ' ' + escapeHTML(odometerNode?.getAttribute('UNIT'));
+            const opTime = escapeHTML(xml.querySelector('VEHICLE DATA OPERATINGTIME')?.textContent);
+            const date = escapeHTML(xml.querySelector('RESULT HEADER START_TEST')?.textContent);
+
+            let html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Vehicle Analysis Protocol - ${vin}</title>
+    <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; margin: 20px; color: #333; line-height: 1.4; background-color: #f7f9fa;}
+        h1 { color: #d50000; border-bottom: 2px solid #333; padding-bottom: 10px; margin-top: 0; }
+        #searchBar { width: 100%; padding: 12px; font-size: 16px; border: 1px solid #ccc; border-radius: 6px; margin-bottom: 20px; box-sizing: border-box; box-shadow: inset 0 1px 3px rgba(0,0,0,0.1); transition: border-color 0.2s; }
+        #searchBar:focus { border-color: #d50000; outline: none; }
+        .header-box { background: #fff; padding: 20px; border-radius: 8px; border: 1px solid #ccd5dc; margin-bottom: 30px; display: flex; flex-wrap: wrap; gap: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .header-item { flex: 1 1 200px; }
+        .header-item strong { display: block; font-size: 0.9em; color: #666; text-transform: uppercase; letter-spacing: 0.5px;}
+        .header-item span { font-size: 1.2em; font-weight: bold; color: #111; }
+        .ecu-section { margin-bottom: 15px; background: #fff; border: 1px solid #ddd; border-radius: 6px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.05);}
+        .ecu-header { background: #f0f4f8; padding: 15px; margin: 0; cursor: pointer; display: flex; justify-content: space-between; align-items: center; font-weight: bold; font-size: 1.2em; border-bottom: 1px solid #ddd; user-select: none; transition: background 0.2s;}
+        .ecu-header:hover { background: #e2e8f0; }
+        .ecu-header::after { content: '\\25BC'; font-size: 0.8em; color: #666; transition: transform 0.3s ease;}
+        .ecu-header.collapsed::after { transform: rotate(-90deg); }
+        .ecu-content { padding: 15px; display: block; }
+        .ecu-content.hidden { display: none; }
+        .error-badge { background-color: #d50000; color: white; font-size: 0.7em; padding: 3px 8px; border-radius: 12px; margin-left: 15px; vertical-align: middle; font-weight: bold; letter-spacing: 0.5px; box-shadow: 0 1px 2px rgba(0,0,0,0.2); display: inline-block; }
+        h3 { color: #444; margin-top: 10px; margin-bottom: 10px; padding-bottom: 5px; border-bottom: 2px solid #eee; font-size: 1.1em;}
+        h4 { color: #666; margin-left: 20px; margin-bottom: 5px; font-size: 1em;}
+        table { width: 100%; border-collapse: collapse; margin-bottom: 20px; border-radius: 4px; overflow: hidden;}
+        th, td { border: 1px solid #e2e8f0; padding: 8px 12px; text-align: left; }
+        th { background-color: #f8fafc; color: #475569; font-weight: bold; width: 45%; }
+        td:nth-child(2) { width: 40%; font-family: 'Consolas', 'Courier New', monospace; font-size: 1.05em; font-weight: 500;}
+        td:nth-child(3) { width: 15%; color: #64748b; }
+        tr.data-row:nth-child(even) { background-color: #f8fafc; }
+        tr.data-row:hover { background-color: #f1f5f9; }
+        .nested-table { margin-left: 20px; width: calc(100% - 20px); border-left: 4px solid #d50000; box-shadow: none;}
+        .error-section { background-color: #fff5f5; border: 1px solid #fed7d7; padding: 10px; border-radius: 6px; margin-bottom: 15px;}
+        .error-section h3 { color: #c53030; border-bottom-color: #feb2b2; }
+        .error-section th { background-color: #fed7d7; color: #9b2c2c; }
+        .error-section tr.data-row:nth-child(even) { background-color: #fff5f5; }
+        .error-section tr.data-row:hover { background-color: #fed7d7; }
+    </style>
+</head>
+<body>
+    <h1>${title}</h1>
+    <div class="header-box">
+        <div class="header-item"><strong>VIN</strong><span>${vin}</span></div>
+        <div class="header-item"><strong>Odometer</strong><span>${odometer}</span></div>
+        <div class="header-item"><strong>Operating Hours</strong><span>${opTime} h</span></div>
+        <div class="header-item"><strong>Test Date</strong><span>${date}</span></div>
+    </div>
+    <input type="text" id="searchBar" placeholder="Search report (e.g. ignition, error, voltage)..." onkeyup="filterTables()" />
+`;
+
+            const sections = xml.querySelectorAll('RESULT > SECTION');
+            sections.forEach(section => {
+                const secTitle = escapeHTML(section.querySelector(':scope > TITLE')?.textContent);
+                
+                const allMeasTitles = Array.from(section.querySelectorAll('MEAS > TITLE'));
+                const hasError = allMeasTitles.some(t => t.textContent.includes('Fehler') || t.textContent.includes('Error'));
+                const errorBadge = hasError ? '<span class="error-badge">⚠️ Error</span>' : '';
+
+                html += `
+    <div class="ecu-section">
+        <div class="ecu-header collapsed" onclick="toggleSection(this)">
+            <div>${secTitle} ${errorBadge}</div>
+        </div>
+        <div class="ecu-content hidden">`;
+
+                const measBlocks = section.querySelectorAll(':scope > MEAS');
+                measBlocks.forEach(meas => {
+                    const measTitle = escapeHTML(meas.querySelector(':scope > TITLE')?.textContent);
+                    const isError = measTitle.includes('Fehler') || measTitle.includes('Error');
+                    const cssClass = isError ? 'meas-block error-section' : 'meas-block';
+                    
+                    html += `<div class="${cssClass}">
+                        <h3>${measTitle}</h3>
+                        <table class="data-table">
+                            <tr class="header-row"><th>Description</th><th>Value</th><th>Unit</th></tr>`;
+                    
+                    const values = meas.querySelectorAll(':scope > VALUE');
+                    values.forEach(val => {
+                        const tText = escapeHTML(val.getAttribute('TEXT'));
+                        const tUnit = escapeHTML(val.getAttribute('UNIT'));
+                        const tVal = escapeHTML(val.textContent);
+                        html += `<tr class="data-row"><td>${tText}</td><td>${tVal}</td><td>${tUnit}</td></tr>`;
+                    });
+                    html += `</table>`;
+
+                    const nestedMeas = meas.querySelectorAll(':scope > MEAS');
+                    nestedMeas.forEach(nMeas => {
+                        const nTitle = escapeHTML(nMeas.querySelector(':scope > TITLE')?.textContent);
+                        html += `<h4>↳ ${nTitle}</h4>
+                        <table class="data-table nested-table">
+                            <tr class="header-row"><th>Description</th><th>Value</th><th>Unit</th></tr>`;
+                        
+                        const nValues = nMeas.querySelectorAll(':scope > VALUE');
+                        nValues.forEach(val => {
+                            const ntText = escapeHTML(val.getAttribute('TEXT'));
+                            const ntUnit = escapeHTML(val.getAttribute('UNIT'));
+                            const ntVal = escapeHTML(val.textContent);
+                            html += `<tr class="data-row"><td>${ntText}</td><td>${ntVal}</td><td>${ntUnit}</td></tr>`;
+                        });
+                        html += `</table>`;
+                    });
+                    
+                    html += `</div>`;
+                });
+
+                html += `</div></div>`;
+            });
+
+            html += `
+    <script>
+        function toggleSection(headerElement) {
+            headerElement.classList.toggle('collapsed');
+            var content = headerElement.nextElementSibling;
+            content.classList.toggle('hidden');
+        }
+        function filterTables() {
+            var input = document.getElementById("searchBar");
+            var filter = input.value.toUpperCase();
+            var dataRows = document.getElementsByClassName("data-row");
+            for (var i = 0; i < dataRows.length; i++) {
+                var tr = dataRows[i];
+                var td = tr.getElementsByTagName("td");
+                var match = false;
+                
+                if(filter !== "") {
+                    var parentContent = tr.closest('.ecu-content');
+                    if(parentContent && parentContent.classList.contains('hidden')) {
+                        parentContent.classList.remove('hidden');
+                        parentContent.previousElementSibling.classList.remove('collapsed');
+                    }
+                }
+
+                for (var j = 0; j < td.length; j++) {
+                    if (td[j]) {
+                        if ((td[j].textContent || td[j].innerText).toUpperCase().indexOf(filter) > -1) { 
+                            match = true; break; 
+                        }
+                    }
+                }
+                tr.style.display = match ? "" : "none";
+            }
+            
+            var measBlocks = document.getElementsByClassName("meas-block");
+            for(var k=0; k < measBlocks.length; k++){
+                var visibleRows = measBlocks[k].querySelectorAll('.data-row:not([style*="display: none"])');
+                measBlocks[k].style.display = (filter !== "" && visibleRows.length === 0) ? "none" : "";
+            }
+            
+            var ecuSections = document.getElementsByClassName("ecu-section");
+            for(var l=0; l < ecuSections.length; l++){
+                var visibleBlocks = ecuSections[l].querySelectorAll('.meas-block:not([style*="display: none"])');
+                ecuSections[l].style.display = (filter !== "" && visibleBlocks.length === 0) ? "none" : "";
+            }
+        }
+    <\/script>
+</body>
+</html>`;
+            return html;
+        }
+
+        dropzone.addEventListener('click', () => fileInput.click());
+        dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
+        dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+        dropzone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropzone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+        });
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length) handleFile(e.target.files[0]);
+            fileInput.value = ""; 
+        });
+
+        function handleFile(file) {
+            if (!file.name.toLowerCase().endsWith('.xml')) { 
+                status.innerHTML = "<span style='color:red'>Please select an XML file.</span>"; 
+                return; 
+            }
+            
+            status.innerHTML = "Loading preview...";
+            const reader = new FileReader();
+            
+            reader.onload = function(e) {
+                try {
+                    const xmlDoc = new DOMParser().parseFromString(e.target.result, "application/xml");
+                    
+                    if(xmlDoc.getElementsByTagName("parsererror").length > 0) {
+                        throw new Error("The file is not a valid XML.");
+                    }
+
+                    const htmlString = generateHTML(xmlDoc);
+
+                    if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
+                    
+                    const blob = new Blob([htmlString], { type: 'text/html' });
+                    currentBlobUrl = URL.createObjectURL(blob);
+                    currentFileName = file.name;
+
+                    document.getElementById('upload-view').style.display = 'none';
+                    document.getElementById('viewer-view').style.display = 'flex';
+                    document.getElementById('file-title').innerText = file.name;
+                    document.body.style.alignItems = 'flex-start'; 
+                    document.getElementById('preview-frame').src = currentBlobUrl;
+                    
+                    status.innerHTML = "";
+                } catch (err) {
+                    status.innerHTML = "<span style='color:red'>Conversion error: " + err.message + "</span>";
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        document.getElementById('btn-close').addEventListener('click', () => {
+            document.getElementById('viewer-view').style.display = 'none';
+            document.getElementById('upload-view').style.display = 'block';
+            document.body.style.alignItems = 'center';
+            document.getElementById('preview-frame').src = '';
+        });
+
+        document.getElementById('btn-download').addEventListener('click', () => {
+            if (!currentBlobUrl) return;
+            const a = document.createElement('a');
+            a.href = currentBlobUrl;
+            a.download = currentFileName.replace('.xml', '.html');
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        });
+    </script>
+</body>
+</html>
